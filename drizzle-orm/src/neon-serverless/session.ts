@@ -261,22 +261,30 @@ export class NeonSession<
 		transaction: (tx: NeonTransaction<TFullSchema, TSchema>) => Promise<T>,
 		config: PgTransactionConfig = {},
 	): Promise<T> {
-		const session = this.client instanceof Pool // eslint-disable-line no-instanceof/no-instanceof
-			? new NeonSession(await this.client.connect(), this.dialect, this.schema, this.options)
+		const poolClient = this.client instanceof Pool // eslint-disable-line no-instanceof/no-instanceof
+			? await this.client.connect()
+			: undefined;
+		const session = poolClient
+			? new NeonSession(poolClient, this.dialect, this.schema, this.options)
 			: this;
 		const tx = new NeonTransaction<TFullSchema, TSchema>(this.dialect, session, this.schema);
-		await tx.execute(sql`begin ${tx.getTransactionConfigSQL(config)}`);
+
+		try {
+			await tx.execute(sql`begin ${tx.getTransactionConfigSQL(config)}`);
+		} catch (e) {
+			poolClient?.release(e as Error);
+			throw e;
+		}
+
 		try {
 			const result = await transaction(tx);
 			await tx.execute(sql`commit`);
 			return result;
 		} catch (error) {
-			await tx.execute(sql`rollback`);
+			await tx.execute(sql`rollback`).catch(() => {});
 			throw error;
 		} finally {
-			if (this.client instanceof Pool) { // eslint-disable-line no-instanceof/no-instanceof
-				(session.client as PoolClient).release();
-			}
+			poolClient?.release();
 		}
 	}
 }

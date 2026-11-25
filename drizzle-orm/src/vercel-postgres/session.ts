@@ -259,22 +259,30 @@ export class VercelPgSession<
 		transaction: (tx: VercelPgTransaction<TFullSchema, TSchema>) => Promise<T>,
 		config?: PgTransactionConfig | undefined,
 	): Promise<T> {
-		const session = this.client instanceof VercelPool // eslint-disable-line no-instanceof/no-instanceof
-			? new VercelPgSession(await this.client.connect(), this.dialect, this.schema, this.options)
+		const poolClient = this.client instanceof VercelPool // eslint-disable-line no-instanceof/no-instanceof
+			? await this.client.connect()
+			: undefined;
+		const session = poolClient
+			? new VercelPgSession(poolClient, this.dialect, this.schema, this.options)
 			: this;
 		const tx = new VercelPgTransaction<TFullSchema, TSchema>(this.dialect, session, this.schema);
-		await tx.execute(sql`begin${config ? sql` ${tx.getTransactionConfigSQL(config)}` : undefined}`);
+
+		try {
+			await tx.execute(sql`begin${config ? sql` ${tx.getTransactionConfigSQL(config)}` : undefined}`);
+		} catch (e) {
+			poolClient?.release(e as Error);
+			throw e;
+		}
+
 		try {
 			const result = await transaction(tx);
 			await tx.execute(sql`commit`);
 			return result;
 		} catch (error) {
-			await tx.execute(sql`rollback`);
+			await tx.execute(sql`rollback`).catch(() => {});
 			throw error;
 		} finally {
-			if (this.client instanceof VercelPool) { // eslint-disable-line no-instanceof/no-instanceof
-				(session.client as VercelPoolClient).release();
-			}
+			poolClient?.release();
 		}
 	}
 }

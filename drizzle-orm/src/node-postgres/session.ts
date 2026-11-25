@@ -250,20 +250,28 @@ export class NodePgSession<
 		config?: PgTransactionConfig | undefined,
 	): Promise<T> {
 		const isPool = this.client instanceof Pool || Object.getPrototypeOf(this.client).constructor.name.includes('Pool'); // eslint-disable-line no-instanceof/no-instanceof
-		const session = isPool
-			? new NodePgSession(await (<pg.Pool> this.client).connect(), this.dialect, this.schema, this.options)
+		const poolClient = isPool ? await (<pg.Pool> this.client).connect() : undefined;
+		const session = poolClient
+			? new NodePgSession(poolClient, this.dialect, this.schema, this.options)
 			: this;
 		const tx = new NodePgTransaction<TFullSchema, TSchema>(this.dialect, session, this.schema);
-		await tx.execute(sql`begin${config ? sql` ${tx.getTransactionConfigSQL(config)}` : undefined}`);
+
+		try {
+			await tx.execute(sql`begin${config ? sql` ${tx.getTransactionConfigSQL(config)}` : undefined}`);
+		} catch (e) {
+			poolClient?.release(e as Error);
+			throw e;
+		}
+
 		try {
 			const result = await transaction(tx);
 			await tx.execute(sql`commit`);
 			return result;
 		} catch (error) {
-			await tx.execute(sql`rollback`);
+			await tx.execute(sql`rollback`).catch(() => {});
 			throw error;
 		} finally {
-			if (isPool) (session.client as PoolClient).release();
+			poolClient?.release();
 		}
 	}
 
